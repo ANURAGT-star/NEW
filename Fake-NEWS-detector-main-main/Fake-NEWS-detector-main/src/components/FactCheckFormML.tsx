@@ -68,6 +68,7 @@ const FactCheckFormML: React.FC<FactCheckFormMLProps> = ({ onResultReceived }) =
   const [confidence, setConfidence] = useState<number | null>(null);
   const [explanation, setExplanation] = useState<{ word: string; weight: number }[] | null>(null);
   const [showCommunitySection, setShowCommunitySection] = useState(false);
+  const [isFallbackMode, setIsFallbackMode] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -78,12 +79,14 @@ const FactCheckFormML: React.FC<FactCheckFormMLProps> = ({ onResultReceived }) =
     setLoading(true);
     setResult(null);
     setConfidence(null);
+    setIsFallbackMode(false);
     try {
       const res = await checkFakeNewsML(query.trim());
       setResult(res.result);
       setConfidence(res.confidence);
       setExplanation(res.explanation || null);
       setShowCommunitySection(true);
+      setIsFallbackMode(!!res.isFallback);
       onResultReceived(res);
     } catch (error) {
       alert("Failed to check facts using ML model.");
@@ -108,6 +111,11 @@ const FactCheckFormML: React.FC<FactCheckFormMLProps> = ({ onResultReceived }) =
           />
           {result && (
             <div className="mt-4 text-lg">
+              {isFallbackMode && (
+                <div className="bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100 px-3 py-2 rounded-md mb-2 text-sm">
+                  ⚠️ Using simplified offline detection. Results may be less accurate than the full ML model.
+                </div>
+              )}
               <strong>Result:</strong> {result} <br />
               <strong>Confidence:</strong> {(confidence! * 100).toFixed(2)}%
               {explanation && explanation.length > 0 && (
@@ -249,18 +257,13 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
   const [allEvidence, setAllEvidence] = useState<Evidence[]>([]);
   const [voteModal, setVoteModal] = useState<{ open: boolean, idx: number, voteType: 'correct'|'incorrect', reason: string } | null>(null);
 
-  // Handle voting (with or without modal)
-  async function handleVote(idx: number, voteType: 'correct'|'incorrect', reason: string, retract: boolean) {
-    let action: 'retract' | undefined = undefined;
-    if (retract) action = 'retract';
-    await fetch(`${apiBase}/${encodeURIComponent(query)}/${idx}/vote`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: getUserId(), vote: voteType, reason, action })
-    });
-    const updated = await fetch(`${apiBase}/${encodeURIComponent(query)}`).then(r => r.json());
-    setAllEvidence(updated);
-  }
+  const formRef = useRef<HTMLFormElement>(null);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  
+  // Get a storage key for this query
+  const storageKey = `local-evidence-${query}`;
+  
   // Track user's votes for this query (to prevent double voting)
   const [userVotes, setUserVotes] = React.useState<{ [idx: number]: 'approve' | 'correct' | null }>({});
   const [editingIdx, setEditingIdx] = React.useState<number | null>(null);
@@ -270,31 +273,80 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const apiBase = "http://127.0.0.1:5001/api/evidence";
-
-  // Fetch evidence from API
+  // Fetch evidence from localStorage
   React.useEffect(() => {
     if (!query) return;
     setLoading(true);
     setError(null);
-    fetch(`${apiBase}/${encodeURIComponent(query)}`)
-      .then(res => res.json())
-      .then(data => {
-        setAllEvidence(data);
-        // Set userVotes from evidence (if user_id is in approvals/corrections)
-        const votes: { [idx: number]: 'approve' | 'correct' | null } = {};
-        data.forEach((ev: any, idx: number) => {
-          if (ev.approvals && ev.approvals.includes(getUserId())) votes[idx] = 'approve';
-          else if (ev.corrections && ev.corrections.includes(getUserId())) votes[idx] = 'correct';
-          else votes[idx] = null;
-        });
-        setUserVotes(votes);
-      })
-      .catch(() => {
-        setError("Failed to fetch evidence.");
-      })
-      .finally(() => setLoading(false));
-  }, [query, submitted]);
+    
+    try {
+      // Get data from localStorage
+      const storedData = localStorage.getItem(storageKey);
+      const data: Evidence[] = storedData ? JSON.parse(storedData) : [];
+      
+      setAllEvidence(data);
+      // Set userVotes from evidence
+      const votes: { [idx: number]: 'approve' | 'correct' | null } = {};
+      data.forEach((ev: any, idx: number) => {
+        if (ev.correct_votes?.some(v => v.user_id === getUserId())) {
+          votes[idx] = 'approve';
+        } else if (ev.incorrect_votes?.some(v => v.user_id === getUserId())) {
+          votes[idx] = 'correct';
+        } else {
+          votes[idx] = null;
+        }
+      });
+      setUserVotes(votes);
+    } catch (error) {
+      setError("Failed to fetch evidence.");
+      console.error("Error fetching evidence:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [query, submitted, storageKey]);
+
+  // Handle voting for evidence
+  async function handleVote(idx: number, voteType: 'correct'|'incorrect', reason: string, retract: boolean) {
+    const storedData = localStorage.getItem(storageKey);
+    const data: Evidence[] = storedData ? JSON.parse(storedData) : [];
+    
+    if (!data[idx]) return;
+    
+    // Initialize the arrays if they don't exist
+    if (!data[idx].correct_votes) data[idx].correct_votes = [];
+    if (!data[idx].incorrect_votes) data[idx].incorrect_votes = [];
+    
+    const userId = getUserId();
+    
+    if (retract) {
+      // Remove vote
+      if (voteType === 'correct') {
+        data[idx].correct_votes = data[idx].correct_votes?.filter(v => v.user_id !== userId);
+      } else {
+        data[idx].incorrect_votes = data[idx].incorrect_votes?.filter(v => v.user_id !== userId);
+      }
+    } else {
+      // Add vote
+      const vote = { user_id: userId, reason };
+      
+      // First remove any existing votes from this user
+      data[idx].correct_votes = data[idx].correct_votes?.filter(v => v.user_id !== userId);
+      data[idx].incorrect_votes = data[idx].incorrect_votes?.filter(v => v.user_id !== userId);
+      
+      // Then add the new vote
+      if (voteType === 'correct') {
+        data[idx].correct_votes?.push(vote);
+      } else {
+        data[idx].incorrect_votes?.push(vote);
+      }
+    }
+    
+    // Save back to localStorage
+    localStorage.setItem(storageKey, JSON.stringify(data));
+    
+    // Update state
+    setAllEvidence([...data]);
+  }
 
   // Submit new evidence
   const handleSubmit = async (e: React.FormEvent) => {
@@ -302,28 +354,40 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
     if (!evidenceText.trim()) return;
     setLoading(true);
     setError(null);
+    
     try {
-      const res = await fetch(`${apiBase}/${encodeURIComponent(query)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: evidenceText.trim(),
-          url: evidenceUrl.trim() || undefined,
-          timestamp: Date.now(),
-          user_id: getUserId(),
-          verdict,
-        })
-      });
-      if (!res.ok) throw new Error("Failed to submit evidence.");
+      // Create new evidence
+      const newEvidence: Evidence = {
+        text: evidenceText.trim(),
+        url: evidenceUrl.trim() || undefined,
+        timestamp: Date.now(),
+        user_id: getUserId(),
+        verdict,
+        correct_votes: [],
+        incorrect_votes: []
+      };
+      
+      // Get existing data
+      const storedData = localStorage.getItem(storageKey);
+      const data: Evidence[] = storedData ? JSON.parse(storedData) : [];
+      
+      // Add new evidence
+      data.push(newEvidence);
+      
+      // Save to localStorage
+      localStorage.setItem(storageKey, JSON.stringify(data));
+      
+      // Update UI
       setEvidenceText("");
       setEvidenceUrl("");
       setSubmitted(true);
       setTimeout(() => setSubmitted(false), 2000);
-      // Refetch evidence
-      const updated = await fetch(`${apiBase}/${encodeURIComponent(query)}`).then(r => r.json());
-      setAllEvidence(updated);
+      
+      // Update the list
+      setAllEvidence([...data]);
     } catch (err) {
       setError("Failed to submit evidence.");
+      console.error("Error submitting evidence:", err);
     } finally {
       setLoading(false);
     }
@@ -333,14 +397,28 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
   const handleDelete = async (idx: number) => {
     setLoading(true);
     setError(null);
+    
     try {
-      const res = await fetch(`${apiBase}/${encodeURIComponent(query)}/${idx}?user_id=${encodeURIComponent(getUserId())}`, { method: "DELETE" });
-      if (!res.ok) throw new Error();
-      // Refetch evidence
-      const updated = await fetch(`${apiBase}/${encodeURIComponent(query)}`).then(r => r.json());
-      setAllEvidence(updated);
-    } catch {
+      // Get existing data
+      const storedData = localStorage.getItem(storageKey);
+      const data: Evidence[] = storedData ? JSON.parse(storedData) : [];
+      
+      // Check if user is the author
+      if (data[idx]?.user_id !== getUserId()) {
+        throw new Error("You can only delete your own evidence");
+      }
+      
+      // Remove the evidence
+      data.splice(idx, 1);
+      
+      // Save back to localStorage
+      localStorage.setItem(storageKey, JSON.stringify(data));
+      
+      // Update the list
+      setAllEvidence([...data]);
+    } catch (error) {
       setError("Failed to delete evidence.");
+      console.error("Error deleting evidence:", error);
     } finally {
       setLoading(false);
     }
@@ -357,26 +435,38 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
   const handleEditSubmit = async (idx: number) => {
     setLoading(true);
     setError(null);
+    
     try {
-      const res = await fetch(`${apiBase}/${encodeURIComponent(query)}/${idx}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: editText.trim(),
-          url: editUrl.trim() || undefined,
-          verdict: editVerdict,
-          user_id: getUserId(),
-        })
-      });
-      if (!res.ok) throw new Error();
+      // Get existing data
+      const storedData = localStorage.getItem(storageKey);
+      const data: Evidence[] = storedData ? JSON.parse(storedData) : [];
+      
+      // Check if user is the author
+      if (data[idx]?.user_id !== getUserId()) {
+        throw new Error("You can only edit your own evidence");
+      }
+      
+      // Update the evidence
+      data[idx] = {
+        ...data[idx],
+        text: editText.trim(),
+        url: editUrl.trim() || undefined,
+        verdict: editVerdict
+      };
+      
+      // Save back to localStorage
+      localStorage.setItem(storageKey, JSON.stringify(data));
+      
+      // Reset edit state
       setEditingIdx(null);
       setEditText("");
       setEditUrl("");
-      // Refetch evidence
-      const updated = await fetch(`${apiBase}/${encodeURIComponent(query)}`).then(r => r.json());
-      setAllEvidence(updated);
-    } catch {
+      
+      // Update the list
+      setAllEvidence([...data]);
+    } catch (error) {
       setError("Failed to update evidence.");
+      console.error("Error updating evidence:", error);
     } finally {
       setLoading(false);
     }
@@ -387,7 +477,6 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
     setEditText("");
     setEditUrl("");
   };
-
 
   if (!query) {
     return null;
@@ -584,7 +673,7 @@ const CrowdsourceEvidenceSection: React.FC<{ query: string }> = ({ query }) => {
               })}
           </div>
         </div>
-      )}
+      
     </div>
   );
 };
