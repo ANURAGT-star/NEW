@@ -1,0 +1,50 @@
+
+@media print {
+  /* Hide non-essential UI elements */
+  header, footer, nav, button, .print-hidden {
+    display: none !important;
+  }
+  
+  /* Ensure the fact check result is visible and properly formatted */
+  body {
+    background-color: white !important;
+    color: black !important;
+  }
+  
+  /* Override dark mode styles when printing */
+  * {
+    color: black !important;
+    background-color: transparent !important;
+    border-color: #ddd !important;
+  }
+  
+  /* Ensure the layout is optimized for print */
+  .print-container {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  
+  /* Page breaks */
+  .page-break-after {
+    page-break-after: always;
+  }
+  
+  /* Remove box shadows and effects */
+  .card, .shadow, .rounded-md {
+    box-shadow: none !important;
+    border: 1px solid #ddd !important;
+  }
+  
+  /* Ensure links are visible */
+  a {
+    text-decoration: underline !important;
+  }
+  
+  /* Print URLs after links */
+  a[href]:after {
+    content: " (" attr(href) ")";
+    font-size: 0.8em;
+  }
+}

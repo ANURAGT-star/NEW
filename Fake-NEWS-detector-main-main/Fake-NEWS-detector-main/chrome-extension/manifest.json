@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Fake News Detector",
+  "version": "1.0.0",
+  "description": "Fact-check selected text using the Fake News Detector web app.",
+  "permissions": ["contextMenus", "activeTab", "scripting"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+} 
